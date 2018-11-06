@@ -1,0 +1,108 @@
+# based on https://gist.github.com/dkorn/ad508c8ef9bfb65ef92e8cf90061c716#file-compile_nginx_from_sources-yml
+---
+
+- name: Get configure args for existing nginx version
+  shell: "nginx -V"
+  register: nginx_results
+
+- set_fact:
+    version_regex: 'nginx version: nginx/\s*(\d*.\d*.\d*)'
+
+- set_fact:
+    configure_regex: 'configure arguments:\s*([^\n\r]*)'
+
+- set_fact:
+    nginx_version: "{{ nginx_results.stderr | regex_search(version_regex,'\\1') | first }}"
+
+- set_fact:
+    nginx_configure_args: "{{ nginx_results.stderr | regex_search(configure_regex,'\\1') | first }}"
+
+- debug:
+    msg: "Found nginx version: {{ nginx_version }}"
+
+- name: Installing NGINX dependencies
+  become: yes
+  apt:
+    name: "{{ item }}"
+    update_cache: yes
+  with_items:
+  - libgd-dev
+  - libgeoip-dev
+  - libpcre3
+  - libpcre3-dev
+  - libssl-dev
+  - libxslt-dev
+  - zlib1g-dev
+
+  - unzip
+  - libmaxminddb0
+  - libmaxminddb-dev
+  - mmdb-bin
+
+- name: Downloading NGINX
+  get_url:
+    url: "{{ nginx_tarball_url }}"
+    dest: "/tmp/nginx-{{ nginx_version }}.tar.gz"
+  register: nginx_source
+
+- name: Unpacking NGINX
+  unarchive:
+    copy: no
+    dest: /tmp/
+    src: "{{ nginx_source.dest }}"
+  register: nginx_source_unpack
+
+- name: Downloading ngx_http_geoip2_module
+  get_url:
+    url: "{{ nginx_http_geoip2_module_zip_url }}"
+    dest: "/tmp/ngx_http_geoip2_module.zip"
+  register: ngx_http_geoip2_source
+
+- name: Unpacking ngx_http_geoip2_module
+  unarchive:
+    copy: no
+    dest: /tmp/
+    src: "{{ ngx_http_geoip2_source.dest }}"
+    list_files: yes
+  register: ngx_http_geoip2_source_unpack
+
+- name: Configuring NGINX source with ngx_http_geoip2_module
+  command: "./configure --add-dynamic-module=/tmp/{{ ngx_http_geoip2_source_unpack.files.0 }} {{ nginx_configure_args }}"
+  args:
+    chdir: "/tmp/nginx-{{ nginx_version }}"
+  register: nginx_configure
+
+- name: Build ngx_http_geoip2_module
+  become: yes
+  shell: make && make install
+  args:
+    chdir: "/tmp/nginx-{{ nginx_version }}"
+
+- name: Copy ngx_http_geoip2_module.so to correct folder
+  become: yes
+  copy:
+    remote_src: yes
+    src: "/tmp/nginx-{{ nginx_version }}/objs/ngx_http_geoip2_module.so"
+    dest: "{{ nginx_module_install_dir }}"
+
+- name: Create nginx configuration file for geoip2 module
+  become: yes
+  copy:
+    content: "load_module modules/ngx_http_geoip2_module.so;"
+    dest: "/usr/share/nginx/modules-available/mod-http-geoip2.conf"
+
+- name: Create symlink to enable the geoip2 module
+  file:
+    src: "/usr/share/nginx/modules-available/mod-http-geoip2.conf"
+    dest: "{{ nginx_dir }}/modules-enabled/50-mod-http-geoip2.conf"
+    state: link
+
+#- name: Disable geoip module
+#  file:
+#    state: absent
+#    path: "{{ nginx_dir }}/modules-enabled/50-mod-http-geoip.conf"
+
+#- name: Verify Nginx config
+#  become: yes
+#  command: nginx -t
+#  changed_when: false
